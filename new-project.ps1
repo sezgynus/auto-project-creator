@@ -153,8 +153,7 @@ name: Sign Commits
 on:
   push:
     branches:
-      - main
-  workflow_dispatch:
+      - '**'
 
 permissions:
   contents: read
@@ -169,27 +168,27 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@v2
         with:
-          app-id: `${{ secrets.SIGNING_APP_ID }}
-          private-key: `${{ secrets.SIGNING_APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.SIGNING_APP_ID }}
+          private-key: ${{ secrets.SIGNING_APP_PRIVATE_KEY }}
 
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          token: `${{ steps.app-token.outputs.token }}
+          token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 2
 
       - name: Install signing key
         shell: bash
         env:
-          SIGNING_KEY: `${{ secrets.COMMIT_SIGNING_KEY }}
+          SIGNING_KEY: ${{ secrets.COMMIT_SIGNING_KEY }}
         run: |
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
 
-          printf '%s\n' "`$SIGNING_KEY" > ~/.ssh/github_actions_signing
+          printf '%s\n' "$SIGNING_KEY" > ~/.ssh/github_actions_signing
           chmod 600 ~/.ssh/github_actions_signing
 
-          git config --local user.name "$CommitterName"
+          git config --local user.name "Sezgin AÇIKGÖZ"
           git config --local user.email "sezginacikgoz@mail.com"
 
           git config --local gpg.format ssh
@@ -201,17 +200,49 @@ jobs:
         shell: bash
         run: |
           if git cat-file commit HEAD | grep -q '^gpgsig '; then
-            echo "signed=true" >> "`$GITHUB_OUTPUT"
+            echo "signed=true" >> "$GITHUB_OUTPUT"
           else
-            echo "signed=false" >> "`$GITHUB_OUTPUT"
+            echo "signed=false" >> "$GITHUB_OUTPUT"
           fi
+
+      # Explicit audit opt-in: generate assets before amending the same commit.
+      # Normal commits retain the existing signing behavior.
+      - uses: actions/setup-python@v5
+        if: steps.signature.outputs.signed == 'false' && github.ref_name == 'master' && startsWith(github.event.head_commit.message, 'docs(audit):')
+        with:
+          python-version: '3.11'
+
+      - name: Render and validate full documentation audit before signing
+        if: steps.signature.outputs.signed == 'false' && github.ref_name == 'master' && startsWith(github.event.head_commit.message, 'docs(audit):')
+        env:
+          GPIOZERO_PIN_FACTORY: mock
+          PETREL_VERIFY_PUBLISHED_SCREENS: '1'
+        run: |
+          set -euo pipefail
+          python -m pip install pyserial==3.5 websocket-client==1.9.2 Pillow==12.3.0 gpiozero==2.0.1.post3 qrcode==8.2 kconfiglib==14.1.0 pyte==0.8.2
+          python tools/render_docs_screenshots.py
+          python tools/render_print_controls.py
+          python tools/render_print_controls.py --frame
+          python tools/render_docs_workflows.py
+          python tools/render_configuration_screenshots.py
+          python -m unittest discover -s tests -p test_maintenance_published_docs.py -v
+          python -m unittest discover -s tests -p test_print_controls_documentation.py -v
+          python -m unittest discover -s tests -p test_boot_artwork.py -v
+          python -m unittest discover -s tests -p test_reload_icons.py -v
+          python tools/check_documentation.py
+          git add -A -- docs/assets/ docs/screenshots.md docs/screenshots_TR.md
 
       - name: Sign commit
         if: steps.signature.outputs.signed == 'false'
         shell: bash
         run: |
-          git commit --amend --no-edit -S
-          git push --force-with-lease origin HEAD:main
+          if [ "${{ github.ref_name }}" = "fix/audit-plan-completion" ]; then
+            git fetch --unshallow origin
+            git rebase --exec 'if ! git cat-file commit HEAD | grep -q "^gpgsig "; then git commit --amend --no-edit -S; fi' 4636e432a2f0f1fbb68b356fd66b3e51fb08a593
+          else
+            git commit --amend --no-edit -S
+          fi
+          git push --force-with-lease origin HEAD:"${{ github.ref_name }}"
 "@
 
 [IO.File]::WriteAllText(
